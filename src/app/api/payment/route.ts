@@ -1,14 +1,17 @@
-import { NextResponse } from 'next/server';
+// app/api/payment/route.ts
 import { createRazorpayOrder } from '@/lib/payment';
+import { NextResponse } from 'next/server';
 
 export async function POST(request: Request) {
   try {
-    const { amount } = await request.json();
-
-    if (!amount) {
-      return NextResponse.json({ error: 'Amount is required' }, { status: 400 });
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+      return NextResponse.json(
+        { error: 'Payment processor not configured' },
+        { status: 500 }
+      );
     }
 
+    const { amount } = await request.json();
     const order = await createRazorpayOrder(amount);
 
     return NextResponse.json(order);

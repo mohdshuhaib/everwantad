@@ -5,6 +5,7 @@ interface AdBoxProps {
   isPurchased: boolean;
   onClick: () => void;
   className?: string;
+  isLoading?: boolean;
 }
 
 interface AdModalProps {

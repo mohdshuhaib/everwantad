@@ -8,6 +8,8 @@ import AdBox from '@/components/AdBox';
 import AdModal from '@/components/AdModal';
 import { Ad, AdFormData } from '@/types/global';
 import { RxAvatar } from 'react-icons/rx';
+import Script from 'next/script';
+import { createRazorpayOrder } from '@/lib/payment';
 
 export default function UserPage() {
   const [purchasedBoxes, setPurchasedBoxes] = useState<number[]>([]);
@@ -16,6 +18,9 @@ export default function UserPage() {
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [processingPaymentBox, setProcessingPaymentBox] = useState<number | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [paymentSuccess, setPaymentSuccess] = useState<boolean>(false);
   const [user, setUser] = useState<any>(null);
   const router = useRouter();
 
@@ -97,22 +102,135 @@ export default function UserPage() {
     };
   }, [checkAuth, fetchAds, user]);
 
-  const handleBoxClick = (index: number) => {
+  const handleBoxClick = async (index: number) => {
     if (purchasedBoxes.includes(index)) {
       setSelectedBox(index);
       setIsModalOpen(true);
-    } else {
-      alert('Redirecting to payment gateway...');
-      setTimeout(() => {
-        setPurchasedBoxes(prev => [...prev, index]);
-      }, 2000);
+      return;
+    }
+    try {
+      setProcessingPaymentBox(index);
+      setPaymentError(null);
+      setPaymentSuccess(false);
+
+      // Create a payment order
+      const response = await fetch('/api/payment', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount: 83 }), // Set your actual amount here
+      });
+
+      const order = await response.json();
+
+      if (!order.id) {
+        throw new Error('Failed to create payment order');
+      }
+
+      // Load Razorpay script
+      const script = document.createElement('script');
+      script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      script.async = true;
+      script.onload = () => {
+        const options = {
+          key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+          amount: order.amount,
+          currency: order.currency,
+          name: 'Your Company Name',
+          description: `Purchase of Ad Box #${index}`,
+          image: '/logo.png', // Your logo
+          order_id: order.id,
+          handler: async function (response: any) {
+            try {
+              // Verify payment on your server
+              const verificationResponse = await fetch('/api/verify-payment', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  paymentId: response.razorpay_payment_id,
+                  orderId: response.razorpay_order_id,
+                  signature: response.razorpay_signature,
+                  userId: user?.id,
+                  boxIndex: index
+                }),
+              });
+
+              const verificationResult = await verificationResponse.json();
+
+              if (verificationResult.verified) {
+                setPaymentSuccess(true);
+                setPurchasedBoxes(prev => [...prev, index]);
+                setSelectedBox(index);
+                setIsModalOpen(true);
+              } else {
+                setPaymentError('Payment verification failed. Please contact support.');
+              }
+            } catch (error) {
+              console.error('Verification error:', error);
+              setPaymentError('Payment verification failed. Please contact support.');
+            } finally {
+              setProcessingPaymentBox(null);
+              document.body.removeChild(script);
+            }
+          },
+          prefill: {
+            name: user?.email || 'Customer',
+            email: user?.email || '',
+          },
+          theme: {
+            color: '#4f46e5',
+          },
+        };
+
+        const rzp = new (window as any).Razorpay(options);
+        rzp.on('payment.failed', function (response: any) {
+          setPaymentError(`Payment failed: ${response.error.description}`);
+          setProcessingPaymentBox(null);
+          document.body.removeChild(script);
+        });
+        rzp.open();
+      };
+
+      script.onerror = () => {
+        setPaymentError('Failed to load payment processor');
+        setProcessingPaymentBox(null);
+      };
+
+      document.body.appendChild(script);
+    } catch (error) {
+      console.error('Payment error:', error);
+      setPaymentError('Payment failed. Please try again.');
+      setProcessingPaymentBox(null);
     }
   };
 
   const handleAdSubmit = async (data: AdFormData) => {
-    if (!user) return;
+    if (!user || selectedBox === null) return;
 
     try {
+      // 1. First verify the user has purchased this box
+      const { data: purchase, error: purchaseError } = await supabase
+        .from('purchases')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('box_index', selectedBox)
+        .single();
+
+      if (purchaseError || !purchase) {
+        alert('You need to purchase this ad space before creating an ad');
+        return;
+      }
+
+      // 2. Check if purchase is completed (optional)
+      if (purchase.status !== 'completed') {
+        alert('Your payment for this ad space is not yet completed');
+        return;
+      }
+
+      // 3. Proceed with ad creation
       let imageUrl = data.image_url || '';
 
       if (data.image instanceof File) {
@@ -150,6 +268,7 @@ export default function UserPage() {
       }
 
       setIsModalOpen(false);
+      setPaymentSuccess(false); // Clear success message after ad creation
     } catch (error) {
       console.error('Error saving ad:', error);
       alert('Failed to save ad. Please try again.');
@@ -213,6 +332,7 @@ export default function UserPage() {
               <AdBox
                 key={index}
                 isPurchased={purchasedBoxes.includes(index)}
+                isLoading={processingPaymentBox === index}
                 onClick={() => handleBoxClick(index)}
                 className="w-full aspect-square border-2 border-gray-200 hover:border-green-400 transition-colors"
               />
@@ -233,6 +353,18 @@ export default function UserPage() {
               />
             </div>
           </div>
+
+          {paymentError && (
+            <div className="fixed top-4 right-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+              {paymentError}
+            </div>
+          )}
+
+          {paymentSuccess && (
+            <div className="fixed top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
+              Payment successful! Your ad box is now available.
+            </div>
+          )}
 
           {filteredAds.length === 0 ? (
             <div className="bg-white rounded-lg shadow p-8 text-center">
